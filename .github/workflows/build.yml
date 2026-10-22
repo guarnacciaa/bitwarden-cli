@@ -1,0 +1,128 @@
+name: build
+
+# Builds the image only when the upstream CLI changes: the scheduled run asks npm
+# for the latest @bitwarden/cli version and skips everything when that version is
+# already published on Docker Hub. Push and manual runs rebuild on demand.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # daily, 04:17 UTC
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "docker-entrypoint.sh"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild even if this CLI version is already published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PACKAGE: "@bitwarden/cli"
+  IMAGE: bitwarden-cli
+
+jobs:
+  resolve:
+    name: which CLI version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Resolve upstream version and check the registry
+        id: check
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          version="$(npm view "$PACKAGE" version)"
+          echo "latest $PACKAGE on npm: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          status="$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/${IMAGE}/tags/${version}" || true)"
+          echo "docker hub tag ${version}: HTTP ${status}"
+
+          if [ "${FORCE}" = "true" ] || [ "${status}" != "200" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: build and push
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Lowercase image owners (GHCR requires it)
+        id: names
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          echo "ghcr=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "dockerhub=docker.io/$(echo "$DOCKERHUB_USERNAME" | tr '[:upper:]' '[:lower:]')/${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ steps.names.outputs.dockerhub }}
+            ${{ steps.names.outputs.ghcr }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ needs.resolve.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=bitwarden-cli
+            org.opencontainers.image.description=bw serve (Vault Management API) for automated secret rotation
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            CLI_VERSION=${{ needs.resolve.outputs.version }}
+
+      - name: Summary
+        run: |
+          {
+            echo "### bitwarden-cli ${{ needs.resolve.outputs.version }}"
+            echo
+            echo "Published:"
+            echo "- \`${{ steps.names.outputs.dockerhub }}:latest\` / \`:${{ needs.resolve.outputs.version }}\`"
+            echo "- \`${{ steps.names.outputs.ghcr }}:latest\` / \`:${{ needs.resolve.outputs.version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
