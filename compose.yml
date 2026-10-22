@@ -1,0 +1,26 @@
+services:
+  bitwarden-cli:
+    # Published daily by GitHub Actions (github.com/guarnacciaa/bitwarden-cli)
+    # when npm has a new @bitwarden/cli release: latest + <cli-version>.
+    image: guarnacciaa/bitwarden-cli:latest
+    container_name: bitwarden-cli
+    restart: unless-stopped
+    environment:
+      BW_SERVER_URL: ${BW_SERVER_URL:-https://vault.bitwarden.eu}
+      BW_CLIENTID: ${BW_CLIENTID:-}
+      BW_CLIENTSECRET: ${BW_CLIENTSECRET:-}
+      BW_PASSWORD: ${BW_PASSWORD:-}
+      BW_TOKEN: ${BW_TOKEN:-}
+      TZ: Europe/Rome
+    ports:
+      # 8091 on the host belongs to wordpress-multisite; bw serve keeps 8091 inside.
+      # Bound to the LAN address only: the serve API has NO authentication, it
+      # just checks that its own process is unlocked.
+      - "192.168.178.2:8191:8091"
+    volumes:
+      - /opt/containers/bitwarden-cli/data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "10"

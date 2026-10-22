@@ -38,19 +38,23 @@ fi
 
 if [ -z "$SESSION" ]; then
   cat <<'EOT'
-[bw] no session: container idle on purpose.
+[bw] no session yet: waiting for one.
 
-Run this once on the host and the container picks the session up on restart:
-    /root/bw_unlock.sh
-It asks for the master password at the terminal and stores only the session key
-in this container's /data/.session (0600). The master password is never written
-anywhere: not in Vault, not in the stack env, not in a log.
+Two ways to provide it, both without touching this container:
+  * set BW_CLIENTID / BW_CLIENTSECRET / BW_PASSWORD in the stack env (unattended), or
+  * let the rotation task unlock it: it writes /data/.session and this container
+    starts serving on its own within ~10s.
 
-Alternative, for unattended restarts: set BW_CLIENTID / BW_CLIENTSECRET /
-BW_PASSWORD in this stack's env (encrypted at rest, but that is the vault master
-password — a bigger blast radius than the session key).
+Waiting for /data/.session ...
 EOT
-  exec sleep infinity
+  # Self-healing: a rotation can unlock the vault while the container is already
+  # running (Docker restart is not always available). Poll for the session file
+  # and start serving as soon as it appears, instead of idling forever.
+  while [ ! -s /data/.session ]; do
+    sleep 10
+  done
+  SESSION="$(cat /data/.session)"
+  echo "[bw] session appeared, starting"
 fi
 
 echo "$SESSION" > /data/.session
